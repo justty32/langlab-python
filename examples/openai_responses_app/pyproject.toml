@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openai-responses-tutorial"
+version = "0.1.0"
+description = "Importable OpenAI Responses API client, CLI, and HTTP endpoint"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["openai>=1.68"]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.115", "uvicorn>=0.30"]
+
+[project.scripts]
+llm-demo = "llm_endpoint.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_endpoint"]

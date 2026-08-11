@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>1. 30 分鐘重新上手 · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html" aria-current="page">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#1-30">1. 30 分鐘重新上手</a><ul>
+<li><a href="#11">1.1 執行方式</a></li>
+<li><a href="#12">1.2 一頁語法</a></li>
+<li><a href="#13-cgolua">1.3 C++／Go／Lua 心智映射</a></li>
+<li><a href="#14-value-slot">1.4 名稱綁定，不是 value slot</a></li>
+<li><a href="#15">1.5 高頻語法糖</a></li>
+<li><a href="#16-unicode-bytes">1.6 Unicode 與 bytes</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="1-30">1. 30 分鐘重新上手<a class="headerlink" href="#1-30" title="Permanent link">&para;</a></h2>
+<h3 id="11">1.1 執行方式<a class="headerlink" href="#11" title="Permanent link">&para;</a></h3>
+<pre><code class="language-powershell">python                 # REPL
+python hello.py        # 把檔案當 script
+python -m some.module  # 以 module 身分執行；專案內優先用這個
+python -m pip --version
+</code></pre>
+<p><code>python -m x</code> 類似「請目前這個 interpreter 從 import path 找到 <code>x</code> 再執行」。它能避免 Windows 上 <code>pip</code> 和 <code>python</code> 指向不同環境。</p>
+<p>建立隔離環境：</p>
+<pre><code class="language-powershell">python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+</code></pre>
+<p>Linux／macOS 的啟用指令是 <code>source .venv/bin/activate</code>。也可以用較快的 <code>uv venv</code>、<code>uv pip install ...</code>，但先懂標準工具，才不會把套件管理器和 Python 本身混在一起。</p>
+<h3 id="12">1.2 一頁語法<a class="headerlink" href="#12" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from dataclasses import dataclass
+
+name = &quot;Ada&quot;                       # str
+count = 3                          # int 不會 overflow 成負數
+ratio = 0.5                        # float 通常是 IEEE-754 double
+payload = b&quot;\x00\x01&quot;             # bytes，不是 str
+missing = None                     # 類似 nil/null，但它是一個物件
+
+items = [&quot;c++&quot;, &quot;go&quot;, &quot;lua&quot;]      # list，可變 sequence
+point = (10, 20)                   # tuple，不可變 sequence
+scores = {&quot;c++&quot;: 10, &quot;go&quot;: 9}     # dict，保持插入順序
+tags = {&quot;systems&quot;, &quot;backend&quot;}      # set
+
+if name and count &gt; 0:
+    print(f&quot;{name=}, {count=}&quot;)
+
+for index, language in enumerate(items, start=1):
+    print(index, language)
+
+squares = [n * n for n in range(10) if n % 2 == 0]
+
+
+def divide(a: float, b: float) -&gt; float:
+    if b == 0:
+        raise ValueError(&quot;b must not be zero&quot;)
+    return a / b
+
+
+@dataclass(frozen=True, slots=True)
+class User:
+    name: str
+    languages: tuple[str, ...] = ()
+</code></pre>
+<p>縮排是語法。慣例為四個空白；沒有 <code>begin/end</code> 或 <code>{}</code>。</p>
+<h3 id="13-cgolua">1.3 C++／Go／Lua 心智映射<a class="headerlink" href="#13-cgolua" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Python</th>
+<th>最接近的既有直覺</th>
+<th>重要差異</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>list[T]</code></td>
+<td><code>std::vector&lt;T&gt;</code>／Go slice／Lua array-like table</td>
+<td>裡面可混型別，型別提示不強制</td>
+</tr>
+<tr>
+<td><code>dict[K, V]</code></td>
+<td><code>unordered_map</code>／Go map／Lua table</td>
+<td>保持插入順序；key 必須 hashable</td>
+</tr>
+<tr>
+<td><code>tuple</code></td>
+<td><code>std::tuple</code>／Go struct value</td>
+<td>不可變，可當 dict key（元素也需 hashable）</td>
+</tr>
+<tr>
+<td><code>dataclass</code></td>
+<td>aggregate struct</td>
+<td>class 仍是 runtime object；預設可變</td>
+</tr>
+<tr>
+<td><code>Protocol</code></td>
+<td>Go interface</td>
+<td>structural typing，但主要由 type checker 檢查</td>
+</tr>
+<tr>
+<td>exception</td>
+<td>C++ exception</td>
+<td>Go 通常用 <code>(value, error)</code>；Python 以 exception 為主</td>
+</tr>
+<tr>
+<td>generator</td>
+<td>lazy range／Lua coroutine</td>
+<td><code>yield</code> 暫停 frame，按需產生值</td>
+</tr>
+<tr>
+<td>context manager</td>
+<td>RAII guard／Go <code>defer</code></td>
+<td>scope 由 <code>with</code> 明確標出</td>
+</tr>
+</tbody>
+</table>
+<h3 id="14-value-slot">1.4 名稱綁定，不是 value slot<a class="headerlink" href="#14-value-slot" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">a = [1, 2]
+b = a
+b.append(3)
+assert a == [1, 2, 3]   # a、b 指向同一個 list
+
+c = a.copy()            # shallow copy
+c.append(4)
+assert a == [1, 2, 3]
+
+x = 10
+y = x
+y += 1
+assert x == 10           # int 不可變；y 被重新綁到另一個 int
+</code></pre>
+<p>函式參數也是名稱綁定。常有人稱它「call by object sharing」：傳入的不是 C++ reference 語法，但 caller 與 callee 一開始指向同一個物件。</p>
+<pre><code class="language-python">def mutate(xs: list[int]) -&gt; None:
+    xs.append(99)       # 修改 caller 看得到的物件
+
+
+def rebind(xs: list[int]) -&gt; None:
+    xs = [99]           # 只改 local name，caller 看不到
+</code></pre>
+<h3 id="15">1.5 高頻語法糖<a class="headerlink" href="#15" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">first, *middle, last = [1, 2, 3, 4]
+pair = (first, last)
+
+for left, right in zip([1, 2], [10, 20], strict=True):
+    print(left + right)
+
+config = {&quot;timeout&quot;: 10, &quot;debug&quot;: False}
+override = {&quot;debug&quot;: True}
+merged = config | override
+
+status = &quot;ready&quot; if count &gt; 0 else &quot;empty&quot;
+
+if (size := len(payload)) &gt; 0:     # := 賦值運算式；少量使用
+    print(size)
+
+match command:                     # structural pattern matching
+    case {&quot;op&quot;: &quot;add&quot;, &quot;x&quot;: x, &quot;y&quot;: y}:
+        result = x + y
+    case {&quot;op&quot;: &quot;quit&quot;}:
+        result = None
+    case _:
+        raise ValueError(&quot;unknown command&quot;)
+</code></pre>
+<p>常用內建優先記：<code>len</code>、<code>range</code>、<code>enumerate</code>、<code>zip</code>、<code>sorted</code>、<code>min/max</code>、<code>sum</code>、<code>any/all</code>、<code>isinstance</code>。</p>
+<p><code>is</code> 比 identity，<code>==</code> 比 value：</p>
+<pre><code class="language-python">if value is None:       # 正確
+    ...
+
+if value == 0:          # value equality
+    ...
+</code></pre>
+<p>不要靠小整數或字串 interning 猜 <code>is</code> 的結果。</p>
+<h3 id="16-unicode-bytes">1.6 Unicode 與 bytes<a class="headerlink" href="#16-unicode-bytes" title="Permanent link">&para;</a></h3>
+<p>Python 3 的 <code>str</code> 是 Unicode text；<code>bytes</code> 是 0–255 的 byte sequence。FFI、檔案與 HTTP 邊界必須明確 encode/decode。</p>
+<pre><code class="language-python">text = &quot;臺灣&quot;
+wire = text.encode(&quot;utf-8&quot;)
+assert wire.decode(&quot;utf-8&quot;) == text
+
+with open(&quot;config.json&quot;, &quot;r&quot;, encoding=&quot;utf-8&quot;) as file:
+    source = file.read()
+</code></pre>
+<p>規則：內部盡量用 <code>str</code>；在 I/O 邊界才轉 <code>bytes</code>。不要用 <code>str(bytes_value)</code> 期待 decode。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="00-reading-guide.html">← 怎麼讀，認知負擔最低</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming →</a></nav>
+        <p class="footer"><a href="../chapters/01-quick-start.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

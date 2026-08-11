@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>14. 最終實戰：OpenAI Responses API · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html" aria-current="page">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#14-openai-responses-api">14. 最終實戰：OpenAI Responses API</a><ul>
+<li><a href="#141-secret">14.1 安裝與 secret</a></li>
+<li><a href="#142-request">14.2 最小文字 request</a></li>
+<li><a href="#143-stream-chunk">14.3 Stream：處理事件，不猜 chunk</a></li>
+<li><a href="#144-image-inputvision">14.4 Image input（vision）</a></li>
+<li><a href="#145-image-generation-tool">14.5 Image generation tool</a></li>
+<li><a href="#146-function-tool-calling">14.6 Function tool calling：模型提議，程式執行</a></li>
+<li><a href="#147-thinkingreasoning-control-chain-of-thought">14.7 Thinking：reasoning control，不是偷看私密 chain-of-thought</a></li>
+<li><a href="#148-cli-endpoint">14.8 CLI 與 endpoint</a></li>
+<li><a href="#149-openai-error-boundary">14.9 OpenAI error boundary</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="14-openai-responses-api">14. 最終實戰：OpenAI Responses API<a class="headerlink" href="#14-openai-responses-api" title="Permanent link">&para;</a></h2>
+<p>完整可執行專案在 <a href="../../examples/openai_responses_app/"><code>examples/openai_responses_app</code></a>。它有三層：</p>
+<pre><code class="language-text">CLI / FastAPI endpoint       # transport boundary、輸入驗證、錯誤映射
+        ↓
+OpenAIResponsesClient        # 可 import 的 application API
+        ↓
+OpenAI Python SDK            # HTTP、SSE、response object
+</code></pre>
+<p>此章以 2026-08-11 的 OpenAI 官方文件核對，使用 Responses API。模型與介面會變；範例預設模型放在 <code>OPENAI_MODEL</code>，程式不把 secret 或 model ID 散落各處。</p>
+<h3 id="141-secret">14.1 安裝與 secret<a class="headerlink" href="#141-secret" title="Permanent link">&para;</a></h3>
+<pre><code class="language-powershell">cd examples\openai_responses_app
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e &quot;.[server]&quot;
+$env:OPENAI_API_KEY = &quot;...&quot;
+$env:OPENAI_MODEL = &quot;gpt-5.6&quot;
+</code></pre>
+<p>SDK 會讀 <code>OPENAI_API_KEY</code>。不要把 key 寫進 Python、<code>.env</code> commit、URL query string 或 log。production 用平台 secret manager，並設 budget／rate limit。</p>
+<h3 id="142-request">14.2 最小文字 request<a class="headerlink" href="#142-request" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from openai import OpenAI
+
+client = OpenAI()
+response = client.responses.create(
+    model=&quot;gpt-5.6&quot;,
+    input=&quot;用三點解釋 Python context manager。&quot;,
+)
+print(response.output_text)
+</code></pre>
+<p>Responses API 的 output 是 typed item list，不永遠只有文字；<code>output_text</code> 是 SDK 提供的便利聚合屬性。</p>
+<h3 id="143-stream-chunk">14.3 Stream：處理事件，不猜 chunk<a class="headerlink" href="#143-stream-chunk" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">stream = client.responses.create(
+    model=&quot;gpt-5.6&quot;,
+    input=&quot;解釋 GIL，限 200 字。&quot;,
+    stream=True,
+)
+
+for event in stream:
+    if event.type == &quot;response.output_text.delta&quot;:
+        print(event.delta, end=&quot;&quot;, flush=True)
+    elif event.type == &quot;response.completed&quot;:
+        print()
+    elif event.type == &quot;error&quot;:
+        raise RuntimeError(str(event))
+</code></pre>
+<p>官方 stream 是 SSE，會有 <code>response.created</code>、<code>response.output_text.delta</code>、<code>response.completed</code>、<code>error</code> 等 semantic event。不要假設每個 network chunk 都是完整 UTF-8 字元或 JSON message；讓 SDK 做 framing。</p>
+<p>若你的 server 再把它轉送給 browser，要處理 client disconnect 與 backpressure；不要無界 queue 累積 delta。</p>
+<h3 id="144-image-inputvision">14.4 Image input（vision）<a class="headerlink" href="#144-image-inputvision" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">response = client.responses.create(
+    model=&quot;gpt-5.6&quot;,
+    input=[{
+        &quot;role&quot;: &quot;user&quot;,
+        &quot;content&quot;: [
+            {&quot;type&quot;: &quot;input_text&quot;, &quot;text&quot;: &quot;這張圖有哪些值得注意的 UI 問題？&quot;},
+            {&quot;type&quot;: &quot;input_image&quot;, &quot;image_url&quot;: image_url, &quot;detail&quot;: &quot;auto&quot;},
+        ],
+    }],
+)
+</code></pre>
+<p><code>image_url</code> 可是完整 URL 或 base64 data URL。接受使用者 URL 代抓時要注意 SSRF、內容大小、MIME 與 timeout；更嚴謹的服務會先下載到受控儲存，再傳 file ID。</p>
+<h3 id="145-image-generation-tool">14.5 Image generation tool<a class="headerlink" href="#145-image-generation-tool" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">import base64
+from pathlib import Path
+
+response = client.responses.create(
+    model=&quot;gpt-5.6&quot;,
+    input=&quot;產生一張簡潔的 Python iterator 流程圖，深色背景。&quot;,
+    tools=[{&quot;type&quot;: &quot;image_generation&quot;, &quot;action&quot;: &quot;generate&quot;}],
+)
+
+for item in response.output:
+    if item.type == &quot;image_generation_call&quot; and item.result:
+        Path(&quot;iterator.png&quot;).write_bytes(base64.b64decode(item.result))
+        break
+else:
+    raise RuntimeError(&quot;response did not contain an image&quot;)
+</code></pre>
+<p>Image input（看圖）與 image generation（產圖）是兩件事。模型／帳號是否可用某工具要以當下 model catalog 與你的 project 權限為準。</p>
+<h3 id="146-function-tool-calling">14.6 Function tool calling：模型提議，程式執行<a class="headerlink" href="#146-function-tool-calling" title="Permanent link">&para;</a></h3>
+<p>工具宣告是 JSON Schema：</p>
+<pre><code class="language-python">TOOLS = [{
+    &quot;type&quot;: &quot;function&quot;,
+    &quot;name&quot;: &quot;get_runtime_info&quot;,
+    &quot;description&quot;: &quot;Read allowlisted Python runtime information.&quot;,
+    &quot;parameters&quot;: {
+        &quot;type&quot;: &quot;object&quot;,
+        &quot;properties&quot;: {
+            &quot;field&quot;: {
+                &quot;type&quot;: &quot;string&quot;,
+                &quot;enum&quot;: [&quot;python_version&quot;, &quot;platform&quot;],
+            }
+        },
+        &quot;required&quot;: [&quot;field&quot;],
+        &quot;additionalProperties&quot;: False,
+    },
+    &quot;strict&quot;: True,
+}]
+</code></pre>
+<p>完整 loop：</p>
+<pre><code class="language-python">import json
+
+conversation = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question}]
+response = client.responses.create(model=model, input=conversation, tools=TOOLS)
+
+conversation += response.output  # 保留 reasoning/tool call 等 typed items
+called = False
+for item in response.output:
+    if item.type != &quot;function_call&quot;:
+        continue
+    called = True
+    if item.name != &quot;get_runtime_info&quot;:
+        result = {&quot;error&quot;: &quot;tool_not_allowed&quot;}
+    else:
+        arguments = json.loads(item.arguments)
+        result = dispatch_runtime_info(arguments)
+
+    conversation.append({
+        &quot;type&quot;: &quot;function_call_output&quot;,
+        &quot;call_id&quot;: item.call_id,
+        &quot;output&quot;: json.dumps(result),
+    })
+
+if called:
+    response = client.responses.create(model=model, input=conversation, tools=TOOLS)
+
+print(response.output_text)
+</code></pre>
+<p>Production tool loop 要加：最大回合數、tool allowlist、schema validation、per-tool timeout、權限與 side-effect approval、輸出大小限制、audit log。模型輸出的 argument 是不可信輸入，即使開了 strict schema 也要在 domain boundary 驗證。</p>
+<h3 id="147-thinkingreasoning-control-chain-of-thought">14.7 Thinking：reasoning control，不是偷看私密 chain-of-thought<a class="headerlink" href="#147-thinkingreasoning-control-chain-of-thought" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">response = client.responses.create(
+    model=&quot;gpt-5.6&quot;,
+    input=&quot;比較 thread、process、async，替這個 workload 做決策。&quot;,
+    reasoning={&quot;effort&quot;: &quot;medium&quot;, &quot;summary&quot;: &quot;auto&quot;},
+)
+print(response.output_text)
+</code></pre>
+<p>正確心智模型：</p>
+<ul>
+<li><code>reasoning.effort</code> 控制模型在支援範圍內投入多少推理工作；高不保證永遠較好，會影響 latency／token。</li>
+<li><code>summary</code> 若模型與帳號支援，要求可呈現的 reasoning summary。</li>
+<li>不要假定 API 會提供完整內部 chain-of-thought；應用程式需要的是答案、可驗證證據、tool trace 與可呈現摘要。</li>
+<li>多輪 continuation 可用 <code>previous_response_id</code>；若手動管理 history，保留 <code>response.output</code> 的 typed item，不要只留下純文字。</li>
+</ul>
+<p>若 response 因 token 限制 incomplete，要檢查 status／incomplete details；可能只有 partial output，也可能 token 都花在 reasoning 而還沒有文字。</p>
+<h3 id="148-cli-endpoint">14.8 CLI 與 endpoint<a class="headerlink" href="#148-cli-endpoint" title="Permanent link">&para;</a></h3>
+<p>範例 CLI：</p>
+<pre><code class="language-powershell">llm-demo text &quot;用 C++ 類比解釋 decorator&quot;
+llm-demo stream &quot;逐步解釋 Python import&quot;
+llm-demo vision &quot;https://example.com/image.png&quot; &quot;描述圖片&quot;
+llm-demo image &quot;畫一張 RAII 對照 context manager 的示意圖&quot; --output out.png
+llm-demo tool &quot;我的 Python 版本是什麼？&quot;
+llm-demo reason &quot;替 CPU-bound pipeline 選 concurrency 模型&quot; --effort medium
+</code></pre>
+<p>啟動 HTTP server：</p>
+<pre><code class="language-powershell">uvicorn llm_endpoint.api:app --reload
+</code></pre>
+<p>Endpoint 示範 <code>POST /v1/chat</code> 與 <code>POST /v1/chat/stream</code>。這不是仿造 OpenAI 全部 wire protocol，而是把自己的 domain API 建在可 import client 上；這能避免 transport 與 SDK 細節滲透整個專案。</p>
+<h3 id="149-openai-error-boundary">14.9 OpenAI error boundary<a class="headerlink" href="#149-openai-error-boundary" title="Permanent link">&para;</a></h3>
+<p>SDK error 至少分成：authentication/permission、rate limit、timeout/connection、bad request、server error。只對暫時性且安全重試的 request 做有界 retry。將外部錯誤轉成自己的 <code>LlmError</code>，但用 exception chaining 保留原 traceback；HTTP 層再映射成不洩漏 secret 的 status/body。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="13-testing-workflow.html">← 13. 測試、品質與專案工作流</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="15-decision-table.html">15. 一張決策速查表 →</a></nav>
+        <p class="footer"><a href="../chapters/14-openai-responses.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

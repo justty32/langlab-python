@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>8. 多執行緒、process 與 async · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html" aria-current="page">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#8-process-async">8. 多執行緒、process 與 async</a><ul>
+<li><a href="#81">8.1 選擇表</a></li>
+<li><a href="#82-gil">8.2 GIL 的現代說法</a></li>
+<li><a href="#83-thread-ownership">8.3 Thread：共享記憶體，明確 ownership</a></li>
+<li><a href="#84-process">8.4 Process：序列化邊界</a></li>
+<li><a href="#85-asyncio-goroutine">8.5 asyncio：接近 goroutine 的地方與不像的地方</a></li>
+<li><a href="#86-race-shutdown-checklist">8.6 Race 與 shutdown checklist</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="8-process-async">8. 多執行緒、process 與 async<a class="headerlink" href="#8-process-async" title="Permanent link">&para;</a></h2>
+<p>先區分兩個詞：</p>
+<ul>
+<li><strong>Concurrency</strong>：多個工作在進度上重疊。</li>
+<li><strong>Parallelism</strong>：同一時刻真的在多核心執行。</li>
+</ul>
+<h3 id="81">8.1 選擇表<a class="headerlink" href="#81" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>工作形狀</th>
+<th>首選</th>
+<th>原因／代價</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>少量 blocking I/O library</td>
+<td><code>ThreadPoolExecutor</code></td>
+<td>最容易接既有同步 API</td>
+</tr>
+<tr>
+<td>大量 socket、需要 cancellation/backpressure</td>
+<td><code>asyncio</code></td>
+<td>單 thread 管很多 task；整條 call chain 要 async-aware</td>
+</tr>
+<tr>
+<td>pure Python CPU-bound</td>
+<td><code>ProcessPoolExecutor</code></td>
+<td>繞過一般 CPython GIL；需 pickle 與 IPC</td>
+</tr>
+<tr>
+<td>C extension 會釋放 GIL 的 CPU 工作</td>
+<td>thread 可能有效</td>
+<td>以該 library 文件與 benchmark 為準</td>
+</tr>
+<tr>
+<td>Python 3.14 隔離型平行工作</td>
+<td><code>InterpreterPoolExecutor</code>（進階）</td>
+<td>真多核但 interpreter 隔離、資料需序列化</td>
+</tr>
+<tr>
+<td>free-threaded CPython 3.13+</td>
+<td>thread 可真平行（進階部署選項）</td>
+<td>非預設 build；extension 相容性要逐一確認</td>
+</tr>
+</tbody>
+</table>
+<p>不要把 <code>async</code> 當「更快的 thread」。它是 cooperative scheduling：task 必須在 <code>await</code> 主動讓出控制。</p>
+<p>Lua coroutine 也是 cooperative，但本身通常不附帶 I/O event loop、timeout 與 task lifecycle。Python <code>asyncio</code> 把 coroutine 接到 event loop；兩者都不會因為 <code>yield/await</code> 就自動得到多核心平行。</p>
+<h3 id="82-gil">8.2 GIL 的現代說法<a class="headerlink" href="#82-gil" title="Permanent link">&para;</a></h3>
+<p>一般 CPython build 中，Global Interpreter Lock 讓同一 interpreter 同時只有一個 thread 執行 Python bytecode。因此 CPU-bound pure Python thread 通常不能線性吃滿多核心；但等待檔案、socket，或 native code 釋放 GIL 時，其他 thread 仍可工作。</p>
+<p>Python 3.13 起另有 free-threaded build，可停用 GIL；到 3.14 它仍是需特別安裝／建置的模式，第三方 C extension 可能不支援，甚至在 import 時重新啟用 GIL。不要把「3.13 已沒有 GIL」寫進架構假設。</p>
+<p>GIL <strong>不是你的資料 race lock</strong>。即使某些 operation 在某個 CPython 版本看似 atomic，多步 invariant 仍要同步，而且 free-threaded build 會使偷懶更快出錯。</p>
+<h3 id="83-thread-ownership">8.3 Thread：共享記憶體，明確 ownership<a class="headerlink" href="#83-thread-ownership" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.request import urlopen
+
+
+def fetch_size(url: str) -&gt; tuple[str, int]:
+    with urlopen(url, timeout=5) as response:
+        return url, len(response.read())
+
+
+urls = [&quot;https://example.com&quot;, &quot;https://example.org&quot;]
+with ThreadPoolExecutor(max_workers=8, thread_name_prefix=&quot;fetch&quot;) as pool:
+    futures = [pool.submit(fetch_size, url) for url in urls]
+    for future in as_completed(futures):
+        try:
+            print(future.result())
+        except OSError as error:
+            print(&quot;fetch failed:&quot;, error)
+</code></pre>
+<p>共享狀態用 lock：</p>
+<pre><code class="language-python">from threading import Lock
+
+
+class Counter:
+    def __init__(self) -&gt; None:
+        self._value = 0
+        self._lock = Lock()
+
+    def increment(self) -&gt; int:
+        with self._lock:
+            self._value += 1
+            return self._value
+</code></pre>
+<p>更好的預設是 message passing：<code>queue.Queue</code> 在 thread 間傳工作，讓 mutable state 只屬於一個 worker。這接近 Go「不要藉由共享記憶體通訊」的方向，但 Python queue 是 blocking thread primitive。</p>
+<p>同步工具：</p>
+<ul>
+<li><code>Lock</code>：普通 mutex；用 <code>with lock:</code>。</li>
+<li><code>RLock</code>：同 thread 可重入；常暗示 call graph 太互相糾纏。</li>
+<li><code>Event</code>：一次狀態通知，適合 shutdown flag。</li>
+<li><code>Condition</code>：在 lock 保護的 predicate 上等待；一定用 <code>while not predicate:</code>。</li>
+<li><code>Semaphore</code>：限制同時進入數量。</li>
+<li><code>Queue</code>：有同步的 producer/consumer channel。</li>
+</ul>
+<p>避免 worker 在同一個已滿 pool 內等待另一個 future，容易 deadlock。<code>ThreadPoolExecutor</code> 也不適合永不結束的 daemon service loop。</p>
+<h3 id="84-process">8.4 Process：序列化邊界<a class="headerlink" href="#84-process" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from concurrent.futures import ProcessPoolExecutor
+
+
+def cpu_heavy(number: int) -&gt; int:
+    return sum(i * i for i in range(number))
+
+
+def main() -&gt; None:
+    with ProcessPoolExecutor() as pool:
+        print(list(pool.map(cpu_heavy, [1_000_000] * 4)))
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+<p>Windows 與 spawn 模式尤其需要 <code>if __name__ == "__main__"</code>。傳入 function、argument、return value 必須可 pickle；lambda、REPL local function、open socket／lock 通常不行。把 process boundary 當小型 RPC：資料要小而明確。</p>
+<h3 id="85-asyncio-goroutine">8.5 asyncio：接近 goroutine 的地方與不像的地方<a class="headerlink" href="#85-asyncio-goroutine" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">import asyncio
+
+
+async def fetch_one(client, url: str) -&gt; str:
+    async with asyncio.timeout(5):
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
+
+
+async def main() -&gt; None:
+    async with make_async_client() as client:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(fetch_one(client, url)) for url in URLS]
+        results = [task.result() for task in tasks]
+
+
+asyncio.run(main())
+</code></pre>
+<p>與 Go 的關鍵差異：Python coroutine 必須由 event loop 驅動；直接呼叫 <code>fetch_one(...)</code> 只得到 coroutine object，還沒執行。blocking function 若直接放進 event loop 會卡住全部 task：</p>
+<pre><code class="language-python">result = await asyncio.to_thread(blocking_library_call, argument)
+</code></pre>
+<p>Cancellation 是正常控制流：cleanup 放 <code>finally</code> 或 <code>async with</code>，捕到 <code>asyncio.CancelledError</code> 後通常 cleanup 再 re-raise。所有外部等待都設 timeout；timeout 是 correctness，不只是效能參數。</p>
+<h3 id="86-race-shutdown-checklist">8.6 Race 與 shutdown checklist<a class="headerlink" href="#86-race-shutdown-checklist" title="Permanent link">&para;</a></h3>
+<ul>
+<li>先定義誰擁有 mutable state，再選 lock／queue。</li>
+<li>lock 保護 invariant，不只是單一 container operation。</li>
+<li>不在持 lock 時做未知 callback、I/O 或等待 future。</li>
+<li>設 deadline／timeout；區分「不再接受新工作」和「中止既有工作」。</li>
+<li>executor、session、server 都用 context manager 關閉。</li>
+<li>concurrency test 重複跑並加壓；一次綠不代表沒有 race。</li>
+</ul>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="07-macro-alternatives.html">← 7. 「Macro」在 Python 裡怎麼想</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="09-standard-library.html">9. 標準庫與日常工程工具 →</a></nav>
+        <p class="footer"><a href="../chapters/08-concurrency.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

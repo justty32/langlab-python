@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>5. 記憶體、ownership 與 RAII · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html" aria-current="page">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#5-ownership-raii">5. 記憶體、ownership 與 RAII</a><ul>
+<li><a href="#51-python-ownership">5.1 Python 的 ownership 模型</a></li>
+<li><a href="#52-with-raii">5.2 with 是最接近 RAII 的主力</a></li>
+<li><a href="#53-__del__-destructor">5.3 __del__ 不是 destructor 等價物</a></li>
+<li><a href="#54-cycleweakrefcopy">5.4 Cycle、weakref、copy</a></li>
+<li><a href="#55">5.5 記憶體與效能工具</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="5-ownership-raii">5. 記憶體、ownership 與 RAII<a class="headerlink" href="#5-ownership-raii" title="Permanent link">&para;</a></h2>
+<h3 id="51-python-ownership">5.1 Python 的 ownership 模型<a class="headerlink" href="#51-python-ownership" title="Permanent link">&para;</a></h3>
+<p>語言層保證的是「物件在仍可達時存在」，不保證 CPython reference count 的精確釋放時刻是 portable semantics。CPython 主要用 reference counting，另有 cyclic GC；其他 implementation 可以不同。</p>
+<pre><code class="language-python">import gc
+import sys
+
+obj = []
+alias = obj
+print(sys.getrefcount(obj))  # 含呼叫本身的暫時 reference；只適合診斷
+del alias                   # 刪除名稱綁定，不是 delete/free obj
+gc.collect()                # 通常不該成為業務邏輯
+</code></pre>
+<p>最重要的區分：</p>
+<ul>
+<li>Python object memory：由 runtime 管。</li>
+<li>external resource（fd、socket、lock、C buffer、transaction）：由你的程式明確管理。</li>
+</ul>
+<p>Python 官方 data model 也明確提醒：GC 不保證發生，因此外部資源應提供並使用 <code>close()</code> 等明確釋放方式。</p>
+<p>這和 Lua 的 GC 心智模型相近：一般 object 交給 runtime，但 <code>__gc</code> finalizer 不適合當重要資源的正常釋放路徑。若你用 Lua 5.4，to-be-closed variable（<code>&lt;close&gt;</code>）在目的上比 GC 更接近 Python <code>with</code>。</p>
+<h3 id="52-with-raii">5.2 <code>with</code> 是最接近 RAII 的主力<a class="headerlink" href="#52-with-raii" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from pathlib import Path
+
+path = Path(&quot;data.bin&quot;)
+with path.open(&quot;rb&quot;) as file:
+    header = file.read(16)
+# 正常 return 或 exception 都會 close
+</code></pre>
+<p>對 C++ 工程師可把 context manager 看成顯式 scope guard：</p>
+<pre><code class="language-python">class Transaction:
+    def __enter__(self) -&gt; &quot;Transaction&quot;:
+        self.begin()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -&gt; bool:
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False  # 不吞 exception
+</code></pre>
+<p>更常用 <code>contextlib</code> 寫：</p>
+<pre><code class="language-python">from contextlib import contextmanager
+from collections.abc import Iterator
+
+
+@contextmanager
+def locked(lock) -&gt; Iterator[None]:
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+</code></pre>
+<p>Go <code>defer cleanup()</code> 能把 cleanup 掛在 function scope；Python <code>with</code> 能把 cleanup 限定在更小、可組合的 lexical scope。</p>
+<h3 id="53-__del__-destructor">5.3 <code>__del__</code> 不是 destructor 等價物<a class="headerlink" href="#53-__del__-destructor" title="Permanent link">&para;</a></h3>
+<p><strong>避免用 <code>__del__</code> 管重要資源。</strong> 它可能因 cycle、interpreter shutdown、resurrection 與例外處理而難以推理。優先順序：</p>
+<ol>
+<li><code>with</code> / async <code>async with</code></li>
+<li>明確 <code>close()</code>，而且設計成 idempotent</li>
+<li><code>weakref.finalize</code> 當 safety net，不當正常控制流</li>
+</ol>
+<h3 id="54-cycleweakrefcopy">5.4 Cycle、weakref、copy<a class="headerlink" href="#54-cycleweakrefcopy" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">import copy
+import weakref
+
+shallow = copy.copy(nested)       # 外層新，內層仍共享
+deep = copy.deepcopy(nested)      # 遞迴複製；可能昂貴或語意不合理
+
+cache: weakref.WeakValueDictionary[str, Node] = weakref.WeakValueDictionary()
+</code></pre>
+<p>不要把 <code>deepcopy</code> 當 C++ value semantics 的萬用替代；socket、lock、file、foreign pointer 通常根本不該複製。設計明確的 <code>clone()</code> 更好。</p>
+<h3 id="55">5.5 記憶體與效能工具<a class="headerlink" href="#55" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>問題</th>
+<th>工具</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>哪段慢</td>
+<td><code>timeit</code>（micro）、<code>cProfile</code>（whole program）</td>
+</tr>
+<tr>
+<td>哪裡配置記憶體</td>
+<td><code>tracemalloc</code></td>
+</tr>
+<tr>
+<td>單一物件淺層大小</td>
+<td><code>sys.getsizeof</code></td>
+</tr>
+<tr>
+<td>避免一次載入全部</td>
+<td>iterator／generator／streaming I/O</td>
+</tr>
+<tr>
+<td>大量數值</td>
+<td>NumPy 等 native contiguous array；不是 Python <code>list[int]</code></td>
+</tr>
+</tbody>
+</table>
+<p>先 profile 再改。<code>__slots__</code>、object pool、手動 <code>gc.collect()</code> 都不是預設第一步。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="04-errors.html">← 4. 錯誤處理：exception、expected 與 error boundary</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="06-projects-imports.html">6. Module、package、import 與專案組織 →</a></nav>
+        <p class="footer"><a href="../chapters/05-memory-raii.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

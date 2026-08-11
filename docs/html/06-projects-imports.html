@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>6. Module、package、import 與專案組織 · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html" aria-current="page">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#6-modulepackageimport">6. Module、package、import 與專案組織</a><ul>
+<li><a href="#61">6.1 三個容易混淆的名詞</a></li>
+<li><a href="#62-import">6.2 import 做了什麼</a></li>
+<li><a href="#63-__init__pyabsolute-relative-import">6.3 __init__.py、absolute 與 relative import</a></li>
+<li><a href="#64-src-layout">6.4 推薦的 src layout</a></li>
+<li><a href="#65-__main__">6.5 __main__ 與執行入口</a></li>
+<li><a href="#66-circular-import">6.6 Circular import 怎麼避免</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="6-modulepackageimport">6. Module、package、import 與專案組織<a class="headerlink" href="#6-modulepackageimport" title="Permanent link">&para;</a></h2>
+<h3 id="61">6.1 三個容易混淆的名詞<a class="headerlink" href="#61" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>名詞</th>
+<th>例子</th>
+<th>類比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>distribution package</td>
+<td>PyPI 上的 <code>beautifulsoup4</code></td>
+<td>可安裝 artifact／Go module</td>
+</tr>
+<tr>
+<td>import package</td>
+<td><code>bs4/</code></td>
+<td>C++ library namespace 的一部分／Go package</td>
+</tr>
+<tr>
+<td>module</td>
+<td><code>parser.py</code></td>
+<td>一個可載入 translation unit，但執行期也是 object</td>
+</tr>
+</tbody>
+</table>
+<p>distribution 名稱可以有 <code>-</code>，import 名稱是 identifier，兩者不一定相同。</p>
+<h3 id="62-import">6.2 import 做了什麼<a class="headerlink" href="#62-import" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">import json                     # local name 是 json module
+import pathlib as pl
+from collections import deque  # local name 是 deque object
+</code></pre>
+<p>粗略流程：</p>
+<ol>
+<li>先查 <code>sys.modules</code> cache。</li>
+<li>finder 從 built-in、目前程式、環境的 <code>site-packages</code> 等 import path 找 spec。</li>
+<li>建立 module object，<strong>執行 module top-level code</strong>。</li>
+<li>把結果綁到目前 scope 的名稱。</li>
+</ol>
+<p>所以 import 不是 C++ <code>#include</code> 的文字貼上，也不是只有宣告的 header；它比較像載入並初始化一個 singleton module object。第一次 import 會執行，之後通常取 cache。</p>
+<p>如果從 Lua 看，這很接近 <code>require</code> 查 <code>package.loaded</code>：第一次載入 module chunk，之後回傳 cache。差別是 Python module 本身有正式 namespace、spec、package hierarchy 與可擴充 finder/loader protocol。</p>
+<h3 id="63-__init__pyabsolute-relative-import">6.3 <code>__init__.py</code>、absolute 與 relative import<a class="headerlink" href="#63-__init__pyabsolute-relative-import" title="Permanent link">&para;</a></h3>
+<pre><code class="language-text">src/
+└── packet_lab/
+    ├── __init__.py
+    ├── codec.py
+    └── transport/
+        ├── __init__.py
+        └── http.py
+</code></pre>
+<p>在 <code>transport/http.py</code>：</p>
+<pre><code class="language-python">from packet_lab.codec import encode   # absolute；大型專案較清楚
+from ..codec import decode            # explicit relative；package 內可用
+</code></pre>
+<p>不要寫模糊的 implicit relative import。也不要以修改 <code>sys.path</code> 解正常 packaging 問題。</p>
+<p><code>__init__.py</code> 讓目錄成為 regular package，並可定義穩定 public API：</p>
+<pre><code class="language-python"># packet_lab/__init__.py
+from .codec import Packet, decode, encode
+
+__all__ = [&quot;Packet&quot;, &quot;decode&quot;, &quot;encode&quot;]
+</code></pre>
+<p><code>__all__</code> 主要影響 <code>from packet_lab import *</code> 與 API 意圖，不是 access control。Python 的 <code>_name</code> 是「internal」慣例，不是 private enforcement。</p>
+<h3 id="64-src-layout">6.4 推薦的 src layout<a class="headerlink" href="#64-src-layout" title="Permanent link">&para;</a></h3>
+<pre><code class="language-text">packet-lab/
+├── pyproject.toml
+├── README.md
+├── src/
+│   └── packet_lab/
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── codec.py
+│       └── errors.py
+└── tests/
+    └── test_codec.py
+</code></pre>
+<p><code>src/</code> 隔開 repo root 與可 import 程式碼，可避免「只因目前工作目錄剛好在 path 上所以測試成功」的假象。Python Packaging User Guide 也以此為主要優點。</p>
+<p>最小 <code>pyproject.toml</code>：</p>
+<pre><code class="language-toml">[build-system]
+requires = [&quot;hatchling&gt;=1.27&quot;]
+build-backend = &quot;hatchling.build&quot;
+
+[project]
+name = &quot;packet-lab&quot;
+version = &quot;0.1.0&quot;
+requires-python = &quot;&gt;=3.12&quot;
+dependencies = []
+
+[project.scripts]
+packet-lab = &quot;packet_lab.cli:main&quot;
+</code></pre>
+<p>開發安裝：</p>
+<pre><code class="language-powershell">python -m pip install -e .
+python -c &quot;import packet_lab; print(packet_lab.__file__)&quot;
+python -m packet_lab
+packet-lab --help
+</code></pre>
+<p><code>-e</code> 是 editable install：import 指到你的工作樹，改 <code>.py</code> 後通常不必重裝。正式驗證還應 build wheel 並在乾淨環境安裝：</p>
+<pre><code class="language-powershell">python -m pip install build
+python -m build
+python -m pip install dist\packet_lab-0.1.0-py3-none-any.whl
+</code></pre>
+<h3 id="65-__main__">6.5 <code>__main__</code> 與執行入口<a class="headerlink" href="#65-__main__" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python"># src/packet_lab/__main__.py
+from .cli import main
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<p><code>python -m packet_lab</code> 會執行它。一般 module 也可寫 guard：</p>
+<pre><code class="language-python">def main() -&gt; int:
+    ...
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    raise SystemExit(main())
+</code></pre>
+<p>把真正邏輯放在可 import function；guard 只接線。不要從 package 內用 <code>python src/packet_lab/foo.py</code> 執行，否則 relative import 與 package identity 容易壞掉；用 <code>python -m packet_lab.foo</code>。</p>
+<h3 id="66-circular-import">6.6 Circular import 怎麼避免<a class="headerlink" href="#66-circular-import" title="Permanent link">&para;</a></h3>
+<p>常見成因是 module A 和 B 同時在 top-level 互 import。解法優先順序：</p>
+<ol>
+<li>把共享型別／協定抽到第三個低階 module。</li>
+<li>反轉依賴：傳 callable／Protocol，不直接 import concrete implementation。</li>
+<li>type-only import 放在 <code>if TYPE_CHECKING:</code>。</li>
+<li>最後才考慮 function 內 lazy import。</li>
+</ol>
+<pre><code class="language-python">from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from packet_lab.transport import Transport
+</code></pre>
+<p>避免 import 時連網、啟 thread、讀大型設定。module top-level 以常數、class、function definition 與輕量 registry 為主。</p>
+<p>本 repo 的完整可跑版本在 <a href="../../examples/package_demo/"><code>examples/package_demo</code></a>。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="05-memory-raii.html">← 5. 記憶體、ownership 與 RAII</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想 →</a></nav>
+        <p class="footer"><a href="../chapters/06-projects-imports.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

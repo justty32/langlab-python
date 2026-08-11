@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>11. HTTP client 與 server · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html" aria-current="page">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#11-http-client-server">11. HTTP client 與 server</a><ul>
+<li><a href="#111">11.1 標準庫或第三方？</a></li>
+<li><a href="#112-production-httpx-client">11.2 一個有 production 基本線的 HTTPX client</a></li>
+<li><a href="#113-streaming">11.3 Streaming</a></li>
+<li><a href="#114-fastapi-endpoint">11.4 FastAPI endpoint（用到再學）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="11-http-client-server">11. HTTP client 與 server<a class="headerlink" href="#11-http-client-server" title="Permanent link">&para;</a></h2>
+<h3 id="111">11.1 標準庫或第三方？<a class="headerlink" href="#111" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>urllib.request</code>：零依賴、簡單一次性 request。</li>
+<li><code>httpx</code>：現代 sync + async API、connection pooling、streaming；本教材範例首選。</li>
+<li><code>requests</code>：成熟且常見，只支援同步介面。</li>
+</ul>
+<h3 id="112-production-httpx-client">11.2 一個有 production 基本線的 HTTPX client<a class="headerlink" href="#112-production-httpx-client" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">import httpx
+
+
+class ApiClient:
+    def __init__(self, base_url: str, token: str) -&gt; None:
+        self._client = httpx.Client(
+            base_url=base_url,
+            headers={&quot;Authorization&quot;: f&quot;Bearer {token}&quot;},
+            timeout=httpx.Timeout(10.0, connect=3.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
+    def __enter__(self) -&gt; &quot;ApiClient&quot;:
+        return self
+
+    def __exit__(self, *exc_info) -&gt; None:
+        self._client.close()
+
+    def get_user(self, user_id: str) -&gt; dict[str, object]:
+        response = self._client.get(f&quot;/users/{user_id}&quot;)
+        response.raise_for_status()
+        value = response.json()
+        if not isinstance(value, dict):
+            raise ValueError(&quot;expected JSON object&quot;)
+        return value
+</code></pre>
+<p>重用 <code>Client</code> 才有 connection pool；不要每個 request 都新建。所有 request 設 timeout。處理錯誤時至少區分：</p>
+<ul>
+<li>transport error／timeout：request 未必到達；可能適合 retry。</li>
+<li>HTTP 4xx：通常是 caller 問題，不盲目 retry。</li>
+<li>HTTP 429／5xx：依 <code>Retry-After</code>、idempotency 與 deadline 有界 retry。</li>
+<li>JSON/schema error：peer 回了你不理解的內容；記錄安全的診斷資訊。</li>
+</ul>
+<p>Exponential backoff 要加 jitter，且 retry 次數之外還要有總 deadline。POST 是否可 retry 取決於 idempotency key 與 server contract。</p>
+<h3 id="113-streaming">11.3 Streaming<a class="headerlink" href="#113-streaming" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">with httpx.stream(&quot;GET&quot;, url, timeout=30.0) as response:
+    response.raise_for_status()
+    for chunk in response.iter_bytes():
+        consume(chunk)
+</code></pre>
+<p>Streaming 的意義是 bounded memory 與 lower time-to-first-byte，不代表自動處理 message framing。SSE、NDJSON、chunked binary 都需各自 parser。</p>
+<h3 id="114-fastapi-endpoint">11.4 FastAPI endpoint（用到再學）<a class="headerlink" href="#114-fastapi-endpoint" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+app = FastAPI()
+
+
+class AddRequest(BaseModel):
+    left: int = Field(ge=0)
+    right: int = Field(ge=0)
+
+
+@app.post(&quot;/add&quot;)
+def add(request: AddRequest) -&gt; dict[str, int]:
+    try:
+        return {&quot;result&quot;: checked_add(request.left, request.right)}
+    except OverflowError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+</code></pre>
+<p>Endpoint 是 error boundary：domain exception 在這裡映射到穩定 HTTP status/body；不要把 traceback 回傳給 client。secret 放環境變數或 secret manager，不進 source／log。接受 URL 參數並由 server 代抓時要防 SSRF。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="10-json.html">← 10. JSON：序列化邊界要窄</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL →</a></nav>
+        <p class="footer"><a href="../chapters/11-http.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

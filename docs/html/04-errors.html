@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>4. 錯誤處理：exception、expected 與 error boundary · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html" aria-current="page">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#4-exceptionexpected-error-boundary">4. 錯誤處理：exception、expected 與 error boundary</a><ul>
+<li><a href="#41-cgo">4.1 與 C++／Go 的對照</a></li>
+<li><a href="#42-try">4.2 完整 try 結構</a></li>
+<li><a href="#43">4.3 自訂例外與鏈結</a></li>
+<li><a href="#44-exceptiongroup-except">4.4 ExceptionGroup 與 except*（用到再學）</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="4-exceptionexpected-error-boundary">4. 錯誤處理：exception、expected 與 error boundary<a class="headerlink" href="#4-exceptionexpected-error-boundary" title="Permanent link">&para;</a></h2>
+<h3 id="41-cgo">4.1 與 C++／Go 的對照<a class="headerlink" href="#41-cgo" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>情況</th>
+<th>Python 慣例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>無法開檔、JSON 壞掉、HTTP timeout</td>
+<td>raise exception</td>
+</tr>
+<tr>
+<td>查不到是正常分支</td>
+<td>回傳 <code>None</code>、sentinel，或提供 <code>get/require</code> 兩種 API</td>
+</tr>
+<tr>
+<td>programmer bug／invariant 破壞</td>
+<td>raise，不要轉成普通回傳值</td>
+</tr>
+<tr>
+<td>跨 process／HTTP boundary</td>
+<td>捕捉後轉成穩定 error code／response</td>
+</tr>
+</tbody>
+</table>
+<p>Python 標準生態更接近 C++ exception，不常處處回傳 Go <code>(value, error)</code>。如果需要 <code>expected</code> 風格，可定義明確的 result type，但不要同一層 API 一半回傳 error、一半 raise。</p>
+<p>Lua 的 <code>pcall/xpcall</code> 把「是否成功＋結果」變成普通回傳值；Python 通常讓 exception 沿 call stack 傳播，只在能恢復或跨 boundary 時捕捉。不要把每次 Python 呼叫都包成 <code>pcall</code> 式大範圍 <code>try</code>。</p>
+<h3 id="42-try">4.2 完整 try 結構<a class="headerlink" href="#42-try" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">try:
+    document = load_document(path)
+except FileNotFoundError:
+    document = default_document()
+except PermissionError as error:
+    raise ConfigError(f&quot;cannot read {path}&quot;) from error
+else:
+    validate(document)   # 只在 try 沒拋例外時執行
+finally:
+    metrics.increment(&quot;load.attempt&quot;)
+</code></pre>
+<p>把 <code>try</code> 範圍縮小，避免誤抓到同型但來自別行的 exception。</p>
+<pre><code class="language-python">try:
+    value = mapping[key]
+except KeyError:
+    value = compute_default(key)
+</code></pre>
+<p>這是 EAFP（先做、失敗再處理）。若先檢查 <code>key in mapping</code> 再取值，在並行或外部狀態上可能產生 TOCTOU。</p>
+<h3 id="43">4.3 自訂例外與鏈結<a class="headerlink" href="#43" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">class AppError(Exception):
+    &quot;&quot;&quot;Application-level failure.&quot;&quot;&quot;
+
+
+class InvalidConfigError(AppError):
+    pass
+
+
+def parse_port(text: str) -&gt; int:
+    try:
+        port = int(text)
+    except ValueError as error:
+        raise InvalidConfigError(f&quot;invalid port: {text!r}&quot;) from error
+    if not 1 &lt;= port &lt;= 65535:
+        raise InvalidConfigError(f&quot;port out of range: {port}&quot;)
+    return port
+</code></pre>
+<p><code>raise ... from error</code> 保留因果鏈，類似 Go <code>%w</code>，但 traceback 更完整。bare <code>raise</code> 在 <code>except</code> 內重新拋原例外。</p>
+<p>避免：</p>
+<pre><code class="language-python">try:
+    run()
+except Exception:
+    pass  # 吞掉錯誤、traceback 與 cancellation 訊號
+</code></pre>
+<p>若在 top-level boundary 必須抓廣泛錯誤，要 log traceback、回報失敗，且不要假裝成功。不要捕捉 <code>BaseException</code>，否則連 <code>KeyboardInterrupt</code>、<code>SystemExit</code> 也被吃掉。</p>
+<h3 id="44-exceptiongroup-except">4.4 <code>ExceptionGroup</code> 與 <code>except*</code>（用到再學）<a class="headerlink" href="#44-exceptiongroup-except" title="Permanent link">&para;</a></h3>
+<p>多個 concurrent task 可能同時失敗，Python 3.11+ 用 <code>ExceptionGroup</code> 保存它們：</p>
+<pre><code class="language-python">try:
+    async with asyncio.TaskGroup() as group:
+        group.create_task(fetch(&quot;a&quot;))
+        group.create_task(fetch(&quot;b&quot;))
+except* TimeoutError as group:
+    for error in group.exceptions:
+        log_timeout(error)
+</code></pre>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="03-classes-typing.html">← 3. Class、dataclass、Protocol 與 typing</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="05-memory-raii.html">5. 記憶體、ownership 與 RAII →</a></nav>
+        <p class="footer"><a href="../chapters/04-errors.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

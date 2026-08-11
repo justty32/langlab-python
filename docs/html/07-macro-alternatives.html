@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>7. 「Macro」在 Python 裡怎麼想 · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html" aria-current="page">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#7-macro-python">7. 「Macro」在 Python 裡怎麼想</a><ul>
+<li><a href="#71-macro">7.1 先辨認你原本用 macro 做什麼</a></li>
+<li><a href="#72-decorator-function">7.2 Decorator：包 function，不改語法</a></li>
+<li><a href="#73-context-manager-scope">7.3 Context manager：只包一段 scope</a></li>
+<li><a href="#74-registration-decorator-x-macro-table">7.4 Registration decorator：取代 X-macro table</a></li>
+<li><a href="#75-class-dataclass-__init_subclass__-metaclass">7.5 Class 生成：dataclass → __init_subclass__ → metaclass</a></li>
+<li><a href="#76-descriptor-framework">7.6 Descriptor（進階但常在 framework 看見）</a></li>
+<li><a href="#77-astcodegeneval">7.7 AST、codegen、eval 的界線</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="7-macro-python">7. 「Macro」在 Python 裡怎麼想<a class="headerlink" href="#7-macro-python" title="Permanent link">&para;</a></h2>
+<p>Python 沒有一般用途的 preprocessor macro，也沒有 Rust 式 hygienic macro。這通常是好事：runtime object、function 與 protocol 已能直接表達多數意圖。</p>
+<h3 id="71-macro">7.1 先辨認你原本用 macro 做什麼<a class="headerlink" href="#71-macro" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>C/C++ macro 用途</th>
+<th>Python 首選</th>
+<th>Go／Lua 對照</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>常數</td>
+<td>module constant、<code>Enum</code></td>
+<td><code>const</code>／module field</td>
+</tr>
+<tr>
+<td>小段重用運算</td>
+<td>function</td>
+<td>function</td>
+</tr>
+<tr>
+<td>logging／計時／retry</td>
+<td>decorator 或 context manager</td>
+<td>middleware／defer wrapper</td>
+</tr>
+<tr>
+<td>產生 boilerplate struct</td>
+<td><code>dataclass</code>、class factory</td>
+<td><code>go generate</code>／table factory</td>
+</tr>
+<tr>
+<td>registration</td>
+<td>decorator</td>
+<td><code>init</code> registration／table insert</td>
+</tr>
+<tr>
+<td>compile-time flag</td>
+<td>build config、環境變數、不同 module</td>
+<td>build tags／config</td>
+</tr>
+<tr>
+<td>template specialization</td>
+<td>generic function、<code>singledispatch</code></td>
+<td>interface dispatch</td>
+</tr>
+<tr>
+<td>DSL／source rewrite</td>
+<td>code generation、AST/CST tool（最後手段）</td>
+<td><code>go generate</code>／parser</td>
+</tr>
+</tbody>
+</table>
+<h3 id="72-decorator-function">7.2 Decorator：包 function，不改語法<a class="headerlink" href="#72-decorator-function" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from collections.abc import Callable
+from functools import wraps
+from time import perf_counter
+from typing import ParamSpec, TypeVar
+
+P = ParamSpec(&quot;P&quot;)
+R = TypeVar(&quot;R&quot;)
+
+
+def timed(function: Callable[P, R]) -&gt; Callable[P, R]:
+    @wraps(function)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -&gt; R:
+        start = perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            elapsed = perf_counter() - start
+            print(f&quot;{function.__qualname__}: {elapsed:.6f}s&quot;)
+    return wrapper
+
+
+@timed
+def rebuild_index(path: str) -&gt; int:
+    ...
+</code></pre>
+<p><code>@timed</code> 等價於 <code>rebuild_index = timed(rebuild_index)</code>。它是普通 function composition，可 debug、可測試、可保留型別。記得 <code>@wraps</code>。</p>
+<p>帶參數 decorator 多一層 factory：</p>
+<pre><code class="language-python">def retry(attempts: int):
+    def decorate(function):
+        @wraps(function)
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for _ in range(attempts):
+                try:
+                    return function(*args, **kwargs)
+                except TransientError as error:
+                    last_error = error
+            assert last_error is not None
+            raise last_error
+        return wrapper
+    return decorate
+</code></pre>
+<p>正式 retry 還要考慮 exponential backoff、jitter、deadline、idempotency；不要用 decorator 無差別 retry 所有 exception。</p>
+<h3 id="73-context-manager-scope">7.3 Context manager：只包一段 scope<a class="headerlink" href="#73-context-manager-scope" title="Permanent link">&para;</a></h3>
+<p>如果只想計時 function 的一小段，decorator 太大：</p>
+<pre><code class="language-python">from contextlib import contextmanager
+
+
+@contextmanager
+def span(name: str):
+    start = perf_counter()
+    try:
+        yield
+    finally:
+        print(name, perf_counter() - start)
+
+
+with span(&quot;parse headers&quot;):
+    parse_headers(data)
+</code></pre>
+<h3 id="74-registration-decorator-x-macro-table">7.4 Registration decorator：取代 X-macro table<a class="headerlink" href="#74-registration-decorator-x-macro-table" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">handlers: dict[str, Callable[[dict], object]] = {}
+
+
+def handles(name: str):
+    def register(function):
+        if name in handlers:
+            raise ValueError(f&quot;duplicate handler: {name}&quot;)
+        handlers[name] = function
+        return function
+    return register
+
+
+@handles(&quot;ping&quot;)
+def handle_ping(message: dict) -&gt; dict:
+    return {&quot;type&quot;: &quot;pong&quot;}
+</code></pre>
+<p>import 會執行 decorator，因此 registration 依賴 module 被 import。大型 plugin 系統可改用 package entry points，避免「神秘 import side effect」。</p>
+<h3 id="75-class-dataclass-__init_subclass__-metaclass">7.5 Class 生成：dataclass → <code>__init_subclass__</code> → metaclass<a class="headerlink" href="#75-class-dataclass-__init_subclass__-metaclass" title="Permanent link">&para;</a></h3>
+<p>大多數 boilerplate 用 <code>@dataclass</code> 已足夠。若 subclass 宣告時要驗證：</p>
+<pre><code class="language-python">class Message:
+    opcode: int
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if not isinstance(getattr(cls, &quot;opcode&quot;, None), int):
+            raise TypeError(f&quot;{cls.__name__} must define integer opcode&quot;)
+
+
+class Ping(Message):
+    opcode = 1
+</code></pre>
+<p>Metaclass 是「class object 的 class」。只有 framework 需要攔截 class creation 且 <code>__init_subclass__</code>／class decorator 都不夠時再用。它更接近 runtime class factory，不是 textual macro。</p>
+<h3 id="76-descriptor-framework">7.6 Descriptor（進階但常在 framework 看見）<a class="headerlink" href="#76-descriptor-framework" title="Permanent link">&para;</a></h3>
+<p><code>property</code>、method binding、ORM field 背後都可用 descriptor protocol：<code>__get__</code>、<code>__set__</code>、<code>__delete__</code>。</p>
+<pre><code class="language-python">class Positive:
+    def __set_name__(self, owner, name):
+        self.storage_name = &quot;_&quot; + name
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        return getattr(instance, self.storage_name)
+
+    def __set__(self, instance, value):
+        if value &lt;= 0:
+            raise ValueError(&quot;must be positive&quot;)
+        setattr(instance, self.storage_name, value)
+</code></pre>
+<h3 id="77-astcodegeneval">7.7 AST、codegen、eval 的界線<a class="headerlink" href="#77-astcodegeneval" title="Permanent link">&para;</a></h3>
+<ul>
+<li>若輸入是 data：解析 data，不要生成 Python source。</li>
+<li>若是固定 boilerplate：寫 generator，在 build/dev 時產生並提交或驗證輸出。</li>
+<li>若要修改 Python source 且保留格式：考慮 LibCST；內建 <code>ast</code> 不保留原格式。</li>
+<li><code>eval</code>／<code>exec</code> 絕不能吃不可信輸入；它不是 macro 系統。</li>
+<li>import hook 能改寫載入行為，但會讓 debug、IDE、packaging 都變難；除 framework／研究工具外避免。</li>
+<li><code>assert</code> 可被 <code>python -O</code> 移除，只能檢查內部 invariant，不能驗證外部輸入。</li>
+</ul>
+<hr>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="06-projects-imports.html">← 6. Module、package、import 與專案組織</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="08-concurrency.html">8. 多執行緒、process 與 async →</a></nav>
+        <p class="footer"><a href="../chapters/07-macro-alternatives.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>

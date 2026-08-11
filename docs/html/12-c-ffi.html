@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="給 C++、Go、Lua 工程師的現代 Python 教材">
+  <title>12. C FFI：ABI、ownership、GIL · Modern Python</title>
+  <link rel="stylesheet" href="../assets/tutorial.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到本文</a>
+  <header class="topbar">
+    <a class="brand" href="../modern-python-for-systems-engineers.html">Modern Python</a>
+    <div class="controls"><button id="theme-toggle" type="button" aria-label="切換明暗主題">明／暗</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="全部章節"><h2>全部章節</h2><ol class="chapter-list"><li><a href="00-reading-guide.html">怎麼讀，認知負擔最低</a></li><li><a href="01-quick-start.html">1. 30 分鐘重新上手</a></li><li><a href="02-iterators-functional.html">2. 容器、iterator、generator 與 functional programming</a></li><li><a href="03-classes-typing.html">3. Class、dataclass、Protocol 與 typing</a></li><li><a href="04-errors.html">4. 錯誤處理：exception、expected 與 error boundary</a></li><li><a href="05-memory-raii.html">5. 記憶體、ownership 與 RAII</a></li><li><a href="06-projects-imports.html">6. Module、package、import 與專案組織</a></li><li><a href="07-macro-alternatives.html">7. 「Macro」在 Python 裡怎麼想</a></li><li><a href="08-concurrency.html">8. 多執行緒、process 與 async</a></li><li><a href="09-standard-library.html">9. 標準庫與日常工程工具</a></li><li><a href="10-json.html">10. JSON：序列化邊界要窄</a></li><li><a href="11-http.html">11. HTTP client 與 server</a></li><li><a href="12-c-ffi.html" aria-current="page">12. C FFI：ABI、ownership、GIL</a></li><li><a href="13-testing-workflow.html">13. 測試、品質與專案工作流</a></li><li><a href="14-openai-responses.html">14. 最終實戰：OpenAI Responses API</a></li><li><a href="15-decision-table.html">15. 一張決策速查表</a></li><li><a href="16-exercises.html">16. 下一步練習</a></li><li><a href="17-references.html">參考資料</a></li></ol></nav>
+    <main>
+      <details class="mobile-toc"><summary>本章目錄</summary><div class="toc">
+<ul>
+<li><a href="#12-c-ffiabiownershipgil">12. C FFI：ABI、ownership、GIL</a><ul>
+<li><a href="#121-ctypes">12.1 ctypes 最小範例</a></li>
+<li><a href="#122-foreign-ownership-context-manager">12.2 把 foreign ownership 包成 context manager</a></li>
+<li><a href="#123-callback-lifetime">12.3 Callback lifetime</a></li>
+<li><a href="#124-native-code-gil">12.4 Native code 與 GIL</a></li>
+<li><a href="#125-shipping">12.5 Shipping</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</details>
+      <article id="content">
+        <h2 id="12-c-ffiabiownershipgil">12. C FFI：ABI、ownership、GIL<a class="headerlink" href="#12-c-ffiabiownershipgil" title="Permanent link">&para;</a></h2>
+<p>先選層級：</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>適合</th>
+<th>代價</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ctypes</code>（stdlib）</td>
+<td>快速呼叫既有簡單 C ABI</td>
+<td>宣告錯誤可能 crash；binding 手寫</td>
+</tr>
+<tr>
+<td>CFFI</td>
+<td>中型 C API、想從 header-like declaration 產生介面</td>
+<td>多一個 dependency/build step</td>
+</tr>
+<tr>
+<td>CPython C API</td>
+<td>極致整合、需直接操作 Python object</td>
+<td>最複雜，綁 CPython API/ABI</td>
+</tr>
+<tr>
+<td>pybind11／nanobind</td>
+<td>C++ library</td>
+<td>template binding 方便，但 build/wheel 與 ownership 仍要懂</td>
+</tr>
+</tbody>
+</table>
+<p>若你熟 LuaJIT FFI，<code>ctypes</code>／CFFI 的整體感覺會很接近：宣告 C ABI 後直接呼叫 shared library；同樣地，錯誤 signature、失效 pointer 與 allocator 不配對都可能直接讓 process crash。</p>
+<h3 id="121-ctypes">12.1 ctypes 最小範例<a class="headerlink" href="#121-ctypes" title="Permanent link">&para;</a></h3>
+<p>假設 C library：</p>
+<pre><code class="language-c">// packet.h
+#include &lt;stddef.h&gt;
+#include &lt;stdint.h&gt;
+
+uint32_t checksum(const uint8_t *data, size_t size);
+void *packet_alloc(size_t size);
+void packet_free(void *pointer);
+</code></pre>
+<p>Python binding：</p>
+<pre><code class="language-python">from ctypes import CDLL, POINTER, c_size_t, c_uint8, c_uint32, c_void_p
+from pathlib import Path
+
+library = CDLL(str(Path(&quot;packet.dll&quot;).resolve()))  # Linux: libpacket.so
+
+library.checksum.argtypes = [POINTER(c_uint8), c_size_t]
+library.checksum.restype = c_uint32
+
+library.packet_alloc.argtypes = [c_size_t]
+library.packet_alloc.restype = c_void_p
+library.packet_free.argtypes = [c_void_p]
+library.packet_free.restype = None
+
+
+def checksum(data: bytes) -&gt; int:
+    buffer_type = c_uint8 * len(data)
+    buffer = buffer_type.from_buffer_copy(data)
+    return int(library.checksum(buffer, len(data)))
+</code></pre>
+<p>一定宣告 <code>argtypes</code>／<code>restype</code>。若忘了 pointer restype，ctypes 可能預設當 C <code>int</code>，在 64-bit 截斷 address，結果不是漂亮 exception，而是 process crash。</p>
+<h3 id="122-foreign-ownership-context-manager">12.2 把 foreign ownership 包成 context manager<a class="headerlink" href="#122-foreign-ownership-context-manager" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">class PacketBuffer:
+    def __init__(self, size: int) -&gt; None:
+        pointer = library.packet_alloc(size)
+        if not pointer:
+            raise MemoryError(f&quot;packet_alloc({size}) failed&quot;)
+        self._pointer = c_void_p(pointer)
+
+    @property
+    def pointer(self) -&gt; c_void_p:
+        if self._pointer is None:
+            raise RuntimeError(&quot;buffer already closed&quot;)
+        return self._pointer
+
+    def close(self) -&gt; None:
+        if self._pointer is not None:
+            library.packet_free(self._pointer)
+            self._pointer = None
+
+    def __enter__(self) -&gt; &quot;PacketBuffer&quot;:
+        return self
+
+    def __exit__(self, *exc_info) -&gt; None:
+        self.close()
+</code></pre>
+<p>這裡的核心不是 Python GC，而是清楚寫出 C allocator 與 deallocator 必須配對。API review 時逐一回答：</p>
+<ol>
+<li>pointer 是 borrowed 還是 owned？</li>
+<li>誰 allocate／誰 free？用同一個 CRT／allocator 嗎？</li>
+<li>buffer 有多長？是否 NUL terminated？</li>
+<li>callee 會保留 pointer 超過 call 嗎？</li>
+<li>callback 可能從哪個 thread 進來？</li>
+<li>error 用 return code、<code>errno</code>，還是 out parameter？</li>
+</ol>
+<p><code>c_char_p</code> 適合 NUL-terminated string，不適合內含 <code>\0</code> 的 arbitrary buffer。需要 zero-copy 時看 <code>memoryview</code>／buffer protocol，但 lifetime 必須比 view 長。</p>
+<h3 id="123-callback-lifetime">12.3 Callback lifetime<a class="headerlink" href="#123-callback-lifetime" title="Permanent link">&para;</a></h3>
+<pre><code class="language-python">from ctypes import CFUNCTYPE, c_int
+
+CALLBACK = CFUNCTYPE(c_int, c_int)
+
+
+@CALLBACK
+def on_value(value: int) -&gt; int:
+    try:
+        return handle(value)
+    except Exception:
+        logger.exception(&quot;callback failed&quot;)
+        return -1
+
+callback_keepalive = on_value  # C 還會呼叫時，Python 必須保留 reference
+</code></pre>
+<p>不要讓 exception 穿過 C ABI。轉成約定好的 error code，並確保 callback object 不被 GC。C 建立的 thread 呼回 CPython 時還涉及 thread state／GIL，使用的 FFI library 會處理一部分，但必須按其文件設計。</p>
+<h3 id="124-native-code-gil">12.4 Native code 與 GIL<a class="headerlink" href="#124-native-code-gil" title="Permanent link">&para;</a></h3>
+<p>長時間 blocking／CPU native function 是否釋放 GIL，取決於 binding。CPython extension 常以 <code>Py_BEGIN_ALLOW_THREADS</code>／<code>Py_END_ALLOW_THREADS</code> 包住不碰 Python object 的區段；pybind11 有 <code>gil_scoped_release</code>。釋放後：</p>
+<ul>
+<li>不可讀寫 Python object／呼叫 Python C API（除明確 thread-safe API）。</li>
+<li>C/C++ 共享狀態要自己同步；GIL 不再替你碰巧保護 global cache。</li>
+<li>free-threaded build 還要求 extension 宣告支援，並檢查 borrowed reference 與 container access。</li>
+</ul>
+<h3 id="125-shipping">12.5 Shipping<a class="headerlink" href="#125-shipping" title="Permanent link">&para;</a></h3>
+<p>含 native code 的 wheel 通常綁 OS、CPU、Python ABI。CI 至少要為支援平台 build/test wheel；Linux 常用 manylinux，Windows 要對齊 runtime，macOS 要處理 deployment target／universal2。若 ABI 可保持純 C 且 library 可獨立配送，CFFI/ctypes 有時比 CPython extension 更穩定。</p>
+<hr>
+        <nav class="chapter-nav" aria-label="前後章節"><a rel="prev" href="11-http.html">← 11. HTTP client 與 server</a><a href="../modern-python-for-systems-engineers.html">回索引</a><a rel="next" href="13-testing-workflow.html">13. 測試、品質與專案工作流 →</a></nav>
+        <p class="footer"><a href="../chapters/12-c-ffi.md">閱讀本章 Markdown</a> · 最後更新 2026-08-11。</p>
+      </article>
+    </main>
+  </div>
+  <script src="../assets/tutorial.js"></script>
+</body>
+</html>
