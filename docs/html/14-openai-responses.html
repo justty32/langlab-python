@@ -42,7 +42,7 @@ OpenAIResponsesClient        # 可 import 的 application API
         ↓
 OpenAI Python SDK            # HTTP、SSE、response object
 </code></pre>
-<p>此章以 2026-08-11 的 OpenAI 官方文件核對，使用 Responses API。模型與介面會變；範例預設模型放在 <code>OPENAI_MODEL</code>，程式不把 secret 或 model ID 散落各處。</p>
+<p>此章使用 Responses API。模型與介面會變；以 <code>OPENAI_MODEL</code> 設定模型，集中管理 secret 與 model ID。</p>
 <h3 id="141-secret">14.1 安裝與 secret<a class="headerlink" href="#141-secret" title="Permanent link">&para;</a></h3>
 <pre><code class="language-powershell">cd examples\openai_responses_app
 python -m venv .venv
@@ -64,21 +64,23 @@ print(response.output_text)
 </code></pre>
 <p>Responses API 的 output 是 typed item list，不永遠只有文字；<code>output_text</code> 是 SDK 提供的便利聚合屬性。</p>
 <h3 id="143-stream-chunk">14.3 Stream：處理事件，不猜 chunk<a class="headerlink" href="#143-stream-chunk" title="Permanent link">&para;</a></h3>
-<pre><code class="language-python">stream = client.responses.create(
+<pre><code class="language-python">with client.responses.create(
     model=&quot;gpt-5.6&quot;,
     input=&quot;解釋 GIL，限 200 字。&quot;,
     stream=True,
-)
-
-for event in stream:
-    if event.type == &quot;response.output_text.delta&quot;:
-        print(event.delta, end=&quot;&quot;, flush=True)
-    elif event.type == &quot;response.completed&quot;:
-        print()
-    elif event.type == &quot;error&quot;:
-        raise RuntimeError(str(event))
+) as stream:
+    for event in stream:
+        if event.type == &quot;response.output_text.delta&quot;:
+            print(event.delta, end=&quot;&quot;, flush=True)
+        elif event.type == &quot;response.completed&quot;:
+            print()
+            break
+        elif event.type in {&quot;error&quot;, &quot;response.failed&quot;, &quot;response.incomplete&quot;}:
+            raise RuntimeError(f&quot;stream ended with {event.type}&quot;)
+    else:
+        raise RuntimeError(&quot;stream ended without response.completed&quot;)
 </code></pre>
-<p>官方 stream 是 SSE，會有 <code>response.created</code>、<code>response.output_text.delta</code>、<code>response.completed</code>、<code>error</code> 等 semantic event。不要假設每個 network chunk 都是完整 UTF-8 字元或 JSON message；讓 SDK 做 framing。</p>
+<p>官方 stream 是 SSE，會有 <code>response.created</code>、文字 delta 與完成／失敗等 <a href="https://developers.openai.com/api/reference/resources/responses/streaming-events">semantic event</a>。不要假設每個 network chunk 都是完整 UTF-8 字元或 JSON message；讓 SDK 做 framing。</p>
 <p>若你的 server 再把它轉送給 browser，要處理 client disconnect 與 backpressure；不要無界 queue 累積 delta。</p>
 <h3 id="144-image-inputvision">14.4 Image input（vision）<a class="headerlink" href="#144-image-inputvision" title="Permanent link">&para;</a></h3>
 <pre><code class="language-python">response = client.responses.create(
@@ -134,33 +136,38 @@ else:
 <p>完整 loop：</p>
 <pre><code class="language-python">import json
 
+from llm_endpoint.tools import get_runtime_info as dispatch_runtime_info
+
 conversation = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question}]
-response = client.responses.create(model=model, input=conversation, tools=TOOLS)
-
-conversation += response.output  # 保留 reasoning/tool call 等 typed items
-called = False
-for item in response.output:
-    if item.type != &quot;function_call&quot;:
-        continue
-    called = True
-    if item.name != &quot;get_runtime_info&quot;:
-        result = {&quot;error&quot;: &quot;tool_not_allowed&quot;}
-    else:
-        arguments = json.loads(item.arguments)
-        result = dispatch_runtime_info(arguments)
-
-    conversation.append({
-        &quot;type&quot;: &quot;function_call_output&quot;,
-        &quot;call_id&quot;: item.call_id,
-        &quot;output&quot;: json.dumps(result),
-    })
-
-if called:
+for _ in range(4):  # 每輪都可能再要求工具，限制總回合數
     response = client.responses.create(model=model, input=conversation, tools=TOOLS)
+    conversation += response.output  # 保留 reasoning/tool call 等 typed items
+    calls = [item for item in response.output if item.type == &quot;function_call&quot;]
+    if not calls:
+        print(response.output_text)
+        break
 
-print(response.output_text)
+    for item in calls:
+        if item.name != &quot;get_runtime_info&quot;:
+            result = {&quot;error&quot;: &quot;tool_not_allowed&quot;}
+        else:
+            try:
+                arguments = json.loads(item.arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError(&quot;arguments must be a JSON object&quot;)
+                result = dispatch_runtime_info(arguments)
+            except (ValueError, TypeError):
+                result = {&quot;error&quot;: &quot;invalid_tool_arguments&quot;}
+
+        conversation.append({
+            &quot;type&quot;: &quot;function_call_output&quot;,
+            &quot;call_id&quot;: item.call_id,
+            &quot;output&quot;: json.dumps(result),
+        })
+else:
+    raise RuntimeError(&quot;tool loop exceeded 4 turns&quot;)
 </code></pre>
-<p>Production tool loop 要加：最大回合數、tool allowlist、schema validation、per-tool timeout、權限與 side-effect approval、輸出大小限制、audit log。模型輸出的 argument 是不可信輸入，即使開了 strict schema 也要在 domain boundary 驗證。</p>
+<p>此例已有最大回合數、tool allowlist 與 argument validation；production 還要加 per-tool timeout、權限與 side-effect approval、輸出大小限制、audit log。模型輸出的 argument 是不可信輸入，即使開了 strict schema 也要在 domain boundary 驗證。</p>
 <h3 id="147-thinkingreasoning-control-chain-of-thought">14.7 Thinking：reasoning control，不是偷看私密 chain-of-thought<a class="headerlink" href="#147-thinkingreasoning-control-chain-of-thought" title="Permanent link">&para;</a></h3>
 <pre><code class="language-python">response = client.responses.create(
     model=&quot;gpt-5.6&quot;,
@@ -189,7 +196,8 @@ llm-demo reason &quot;替 CPU-bound pipeline 選 concurrency 模型&quot; --effo
 <p>啟動 HTTP server：</p>
 <pre><code class="language-powershell">uvicorn llm_endpoint.api:app --reload
 </code></pre>
-<p>Endpoint 示範 <code>POST /v1/chat</code> 與 <code>POST /v1/chat/stream</code>。這不是仿造 OpenAI 全部 wire protocol，而是把自己的 domain API 建在可 import client 上；這能避免 transport 與 SDK 細節滲透整個專案。</p>
+<p>Endpoint 提供 <code>POST /v1/chat</code> 與 <code>POST /v1/chat/stream</code>，將 domain API 建在可 import client 上，隔離 transport 與 SDK 細節。</p>
+<p>串流端點回傳 <code>text/plain</code>，先讀第一段文字再送出 HTTP 200；此前上游失敗回傳 502 JSON。開始傳送後無法更改 status，失敗會中止 HTTP body；呼叫端須處理讀取錯誤，不能把部分文字當完整答案。</p>
 <h3 id="149-openai-error-boundary">14.9 OpenAI error boundary<a class="headerlink" href="#149-openai-error-boundary" title="Permanent link">&para;</a></h3>
 <p>SDK error 至少分成：authentication/permission、rate limit、timeout/connection、bad request、server error。只對暫時性且安全重試的 request 做有界 retry。將外部錯誤轉成自己的 <code>LlmError</code>，但用 exception chaining 保留原 traceback；HTTP 層再映射成不洩漏 secret 的 status/body。</p>
 <hr>

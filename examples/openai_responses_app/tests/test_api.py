@@ -3,7 +3,7 @@ import unittest
 from fastapi.testclient import TestClient
 
 from llm_endpoint.api import app, get_client
-from llm_endpoint.errors import LlmConfigurationError
+from llm_endpoint.errors import LlmConfigurationError, LlmError
 
 
 class FakeClient:
@@ -56,6 +56,34 @@ class ApiTests(unittest.TestCase):
         response = self.client.post("/v1/chat/stream", json={"prompt": "hello"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.text, "answer: hello")
+
+    def test_stream_initial_failure_returns_502_without_details(self) -> None:
+        class FailingClient:
+            def stream_text(self, prompt):
+                raise LlmError("secret upstream detail")
+                yield  # Keep the failure lazy, as in the real client.
+
+        app.dependency_overrides[get_client] = FailingClient
+        try:
+            response = self.client.post("/v1/chat/stream", json={"prompt": "hello"})
+        finally:
+            app.dependency_overrides[get_client] = FakeClient
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"error": "upstream_llm_failed"})
+        self.assertNotIn("secret upstream detail", response.text)
+
+    def test_stream_allows_successful_empty_response(self) -> None:
+        class EmptyClient:
+            def stream_text(self, prompt):
+                yield from ()
+
+        app.dependency_overrides[get_client] = EmptyClient
+        try:
+            response = self.client.post("/v1/chat/stream", json={"prompt": "hello"})
+        finally:
+            app.dependency_overrides[get_client] = FakeClient
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "")
 
 
 if __name__ == "__main__":

@@ -21,3 +21,5 @@ uvicorn llm_endpoint.api:app --reload
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+`POST /v1/chat/stream` 回傳 `text/plain`。第一段文字送出前的上游失敗會回傳 502 JSON；傳送開始後的失敗會中止 HTTP body，呼叫端須處理串流讀取錯誤，不能只憑 HTTP 200 判斷答案完整。

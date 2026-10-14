@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -48,18 +49,23 @@ class OpenAIResponsesClient:
         except OpenAIError as error:
             raise LlmError("OpenAI text request failed") from error
 
-    def stream_text(self, prompt: str) -> Iterator[str]:
+    def stream_text(self, prompt: str) -> Generator[str, None, None]:
         try:
-            stream = self._sdk.responses.create(
-                model=self._model,
-                input=prompt,
-                stream=True,
-            )
-            for event in stream:
-                if event.type == "response.output_text.delta":
-                    yield event.delta
-                elif event.type == "error":
-                    raise LlmError(f"OpenAI stream reported an error: {event}")
+            with closing(
+                self._sdk.responses.create(
+                    model=self._model,
+                    input=prompt,
+                    stream=True,
+                )
+            ) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta":
+                        yield event.delta
+                    elif event.type == "response.completed":
+                        return
+                    elif event.type in {"error", "response.failed", "response.incomplete"}:
+                        raise LlmError(f"OpenAI stream ended with {event.type}")
+                raise LlmError("OpenAI stream ended without response.completed")
         except OpenAIError as error:
             raise LlmError("OpenAI streaming request failed") from error
 

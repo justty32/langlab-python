@@ -5,10 +5,12 @@
 ```python
 import unittest
 
+from packet_lab import Packet, decode, encode
+
 
 class CodecTests(unittest.TestCase):
     def test_round_trip(self) -> None:
-        value = Packet(kind=1, payload=b"hello")
+        value = Packet(kind="ping", payload=b"hello")
         self.assertEqual(decode(encode(value)), value)
 
 

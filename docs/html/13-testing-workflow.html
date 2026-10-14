@@ -32,10 +32,12 @@
 <h3 id="131">13.1 標準庫測試先跑得起<a class="headerlink" href="#131" title="Permanent link">&para;</a></h3>
 <pre><code class="language-python">import unittest
 
+from packet_lab import Packet, decode, encode
+
 
 class CodecTests(unittest.TestCase):
     def test_round_trip(self) -&gt; None:
-        value = Packet(kind=1, payload=b&quot;hello&quot;)
+        value = Packet(kind=&quot;ping&quot;, payload=b&quot;hello&quot;)
         self.assertEqual(decode(encode(value)), value)
 
 

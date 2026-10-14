@@ -5,7 +5,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from llm_endpoint import LlmConfigurationError, OpenAIResponsesClient
+from llm_endpoint import LlmConfigurationError, LlmError, OpenAIResponsesClient
 
 
 def item(item_type: str, **values):
@@ -24,6 +24,13 @@ class FakeResponses:
     def create(self, **arguments):
         self.calls.append(arguments)
         return next(self._results)
+
+
+class FakeStream(list):
+    closed = False
+
+    def close(self):
+        self.closed = True
 
 
 class FakeSdk:
@@ -48,14 +55,45 @@ class OpenAIResponsesClientTests(unittest.TestCase):
         self.assertEqual(sdk.responses.calls[0]["model"], "test-model")
 
     def test_stream_yields_only_text_deltas(self) -> None:
-        events = [
+        events = FakeStream([
             item("response.created"),
             item("response.output_text.delta", delta="你"),
             item("response.output_text.delta", delta="好"),
             item("response.completed"),
-        ]
+        ])
         client = OpenAIResponsesClient(sdk=FakeSdk([events]))
         self.assertEqual("".join(client.stream_text("hi")), "你好")
+        self.assertTrue(events.closed)
+
+    def test_stream_failure_after_partial_text_raises_and_closes(self) -> None:
+        for event_type in ("error", "response.failed", "response.incomplete"):
+            with self.subTest(event_type=event_type):
+                events = FakeStream([
+                    item("response.output_text.delta", delta="partial"),
+                    item(event_type),
+                ])
+                stream = OpenAIResponsesClient(sdk=FakeSdk([events])).stream_text("hi")
+                self.assertEqual(next(stream), "partial")
+                with self.assertRaises(LlmError):
+                    next(stream)
+                self.assertTrue(events.closed)
+
+    def test_stream_requires_completion_event(self) -> None:
+        events = FakeStream([item("response.output_text.delta", delta="partial")])
+        client = OpenAIResponsesClient(sdk=FakeSdk([events]))
+        with self.assertRaises(LlmError):
+            list(client.stream_text("hi"))
+        self.assertTrue(events.closed)
+
+    def test_stream_closes_when_caller_stops_early(self) -> None:
+        events = FakeStream([
+            item("response.output_text.delta", delta="partial"),
+            item("response.completed"),
+        ])
+        stream = OpenAIResponsesClient(sdk=FakeSdk([events])).stream_text("hi")
+        next(stream)
+        stream.close()
+        self.assertTrue(events.closed)
 
     def test_generate_image_decodes_base64(self) -> None:
         encoded = base64.b64encode(b"fake png").decode("ascii")

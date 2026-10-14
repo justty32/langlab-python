@@ -10,7 +10,7 @@ OpenAIResponsesClient        # 可 import 的 application API
 OpenAI Python SDK            # HTTP、SSE、response object
 ```
 
-此章以 2026-08-11 的 OpenAI 官方文件核對，使用 Responses API。模型與介面會變；範例預設模型放在 `OPENAI_MODEL`，程式不把 secret 或 model ID 散落各處。
+此章使用 Responses API。模型與介面會變；以 `OPENAI_MODEL` 設定模型，集中管理 secret 與 model ID。
 
 ### 14.1 安裝與 secret
 
@@ -43,22 +43,24 @@ Responses API 的 output 是 typed item list，不永遠只有文字；`output_t
 ### 14.3 Stream：處理事件，不猜 chunk
 
 ```python
-stream = client.responses.create(
+with client.responses.create(
     model="gpt-5.6",
     input="解釋 GIL，限 200 字。",
     stream=True,
-)
-
-for event in stream:
-    if event.type == "response.output_text.delta":
-        print(event.delta, end="", flush=True)
-    elif event.type == "response.completed":
-        print()
-    elif event.type == "error":
-        raise RuntimeError(str(event))
+) as stream:
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            print(event.delta, end="", flush=True)
+        elif event.type == "response.completed":
+            print()
+            break
+        elif event.type in {"error", "response.failed", "response.incomplete"}:
+            raise RuntimeError(f"stream ended with {event.type}")
+    else:
+        raise RuntimeError("stream ended without response.completed")
 ```
 
-官方 stream 是 SSE，會有 `response.created`、`response.output_text.delta`、`response.completed`、`error` 等 semantic event。不要假設每個 network chunk 都是完整 UTF-8 字元或 JSON message；讓 SDK 做 framing。
+官方 stream 是 SSE，會有 `response.created`、文字 delta 與完成／失敗等 [semantic event](https://developers.openai.com/api/reference/resources/responses/streaming-events)。不要假設每個 network chunk 都是完整 UTF-8 字元或 JSON message；讓 SDK 做 framing。
 
 若你的 server 再把它轉送給 browser，要處理 client disconnect 與 backpressure；不要無界 queue 累積 delta。
 
@@ -130,34 +132,39 @@ TOOLS = [{
 ```python
 import json
 
+from llm_endpoint.tools import get_runtime_info as dispatch_runtime_info
+
 conversation = [{"role": "user", "content": question}]
-response = client.responses.create(model=model, input=conversation, tools=TOOLS)
-
-conversation += response.output  # 保留 reasoning/tool call 等 typed items
-called = False
-for item in response.output:
-    if item.type != "function_call":
-        continue
-    called = True
-    if item.name != "get_runtime_info":
-        result = {"error": "tool_not_allowed"}
-    else:
-        arguments = json.loads(item.arguments)
-        result = dispatch_runtime_info(arguments)
-
-    conversation.append({
-        "type": "function_call_output",
-        "call_id": item.call_id,
-        "output": json.dumps(result),
-    })
-
-if called:
+for _ in range(4):  # 每輪都可能再要求工具，限制總回合數
     response = client.responses.create(model=model, input=conversation, tools=TOOLS)
+    conversation += response.output  # 保留 reasoning/tool call 等 typed items
+    calls = [item for item in response.output if item.type == "function_call"]
+    if not calls:
+        print(response.output_text)
+        break
 
-print(response.output_text)
+    for item in calls:
+        if item.name != "get_runtime_info":
+            result = {"error": "tool_not_allowed"}
+        else:
+            try:
+                arguments = json.loads(item.arguments)
+                if not isinstance(arguments, dict):
+                    raise ValueError("arguments must be a JSON object")
+                result = dispatch_runtime_info(arguments)
+            except (ValueError, TypeError):
+                result = {"error": "invalid_tool_arguments"}
+
+        conversation.append({
+            "type": "function_call_output",
+            "call_id": item.call_id,
+            "output": json.dumps(result),
+        })
+else:
+    raise RuntimeError("tool loop exceeded 4 turns")
 ```
 
-Production tool loop 要加：最大回合數、tool allowlist、schema validation、per-tool timeout、權限與 side-effect approval、輸出大小限制、audit log。模型輸出的 argument 是不可信輸入，即使開了 strict schema 也要在 domain boundary 驗證。
+此例已有最大回合數、tool allowlist 與 argument validation；production 還要加 per-tool timeout、權限與 side-effect approval、輸出大小限制、audit log。模型輸出的 argument 是不可信輸入，即使開了 strict schema 也要在 domain boundary 驗證。
 
 ### 14.7 Thinking：reasoning control，不是偷看私密 chain-of-thought
 
@@ -198,7 +205,9 @@ llm-demo reason "替 CPU-bound pipeline 選 concurrency 模型" --effort medium
 uvicorn llm_endpoint.api:app --reload
 ```
 
-Endpoint 示範 `POST /v1/chat` 與 `POST /v1/chat/stream`。這不是仿造 OpenAI 全部 wire protocol，而是把自己的 domain API 建在可 import client 上；這能避免 transport 與 SDK 細節滲透整個專案。
+Endpoint 提供 `POST /v1/chat` 與 `POST /v1/chat/stream`，將 domain API 建在可 import client 上，隔離 transport 與 SDK 細節。
+
+串流端點回傳 `text/plain`，先讀第一段文字再送出 HTTP 200；此前上游失敗回傳 502 JSON。開始傳送後無法更改 status，失敗會中止 HTTP body；呼叫端須處理讀取錯誤，不能把部分文字當完整答案。
 
 ### 14.9 OpenAI error boundary
 

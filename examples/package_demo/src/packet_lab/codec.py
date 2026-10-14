@@ -49,5 +49,6 @@ def decode(wire: bytes) -> Packet:
         KeyError,
         TypeError,
         binascii.Error,
+        ValueError,
     ) as error:
         raise PacketFormatError("invalid packet wire value") from error

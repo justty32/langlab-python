@@ -24,6 +24,11 @@ class CodecTests(unittest.TestCase):
         with self.assertRaises(PacketFormatError):
             decode(b'{"kind":"data","payload_base64":"%%%"}')
 
+    def test_decode_translates_non_ascii_base64_error(self) -> None:
+        with self.assertRaises(PacketFormatError) as context:
+            decode('{"kind":"data","payload_base64":"中"}'.encode("utf-8"))
+        self.assertIsInstance(context.exception.__cause__, ValueError)
+
 
 if __name__ == "__main__":
     unittest.main()
